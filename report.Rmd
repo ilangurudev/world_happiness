@@ -1,0 +1,98 @@
+---
+title: "R Notebook"
+output: html_notebook
+editor_options: 
+  chunk_output_type: console
+---
+
+
+
+```{r setup}
+pacman::p_load(tidyverse,
+               GGally,
+               rebus, 
+               janitor, 
+               corrplot, 
+               mice, 
+               caret,
+               naniar)
+
+
+df_happiness_raw <- 
+  readxl::read_excel("data/WHR2018Chapter2OnlineData.xls") %>% 
+  clean_names()
+
+```
+
+```{r missing values}
+
+vis_dat(df_happiness_raw)
+vis_miss(df_happiness_raw)
+
+#missing too much data as is visible
+df_happiness <- 
+  df_happiness_raw %>% select(-gini_index_world_bank_estimate) 
+
+dfs_imputed <- mice(df_happiness, m=5, maxit=50, meth='pmm', seed=1)
+df_happiness <- complete(dfs_imputed, 1) %>% as_tibble()
+
+vis_miss(df_happiness)
+
+df_happiness <- 
+  df_happiness %>% 
+  rename(healthy_life_expectancy = healthy_life_expectancy_at_birth,
+         std_ladder = standard_deviation_of_ladder_by_country_year,
+         std_mean_ladder = standard_deviation_mean_of_ladder_by_country_year,
+         gini_index_world_bank_mean = gini_index_world_bank_estimate_average_2000_15,
+         gini_of_household_income = gini_of_household_income_reported_in_gallup_by_wp5_year)
+```
+
+```{r eda}
+ggpairs(df_happiness %>% select(-country))
+ggsave("plots/pairwise_scatter.svg", dpi = 1000)
+png("plots/corrplot.png")
+corrplot(cor(df_happiness %>% select(-country)))
+dev.off()
+
+df_happiness %>% 
+  # filter(year == 2017) %>% 
+  ggplot(aes(social_support, life_ladder)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "loess")
+
+
+df_happiness %>% 
+  filter(year == 2017) %>% 
+  arrange(healthy_life_expectancy_at_birth)
+
+
+```
+
+```{r modeling}
+
+df_happiness_caret<- 
+  df_happiness %>% 
+  select(-country) %>%
+  filter(year != 2017) %>% 
+  as.data.frame()
+
+tr <- trainControl(method = "cv", number = 5)
+
+model_rf <- train(life_ladder~., 
+               data = df_happiness_caret, 
+               trControl = tr,
+               method = "ranger")
+
+df_test <- df_happiness %>% filter(year == 2017)
+
+preds <- predict(model, df_test)
+
+df_test %>% 
+  mutate(preds = preds) %>% 
+  select(country, life_ladder, preds, everything()) %>% 
+  filter(country %in% c("Finland", "United States of America", "India", "Japan"))
+
+(mean((preds - df_test$life_ladder)^2))^(1/2)
+
+```
+
