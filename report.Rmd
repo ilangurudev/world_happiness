@@ -72,7 +72,7 @@ df_happiness %>%
 
 df_happiness_caret<- 
   df_happiness %>% 
-  select(-country) %>%
+  select(year, life_ladder, log_gdp_per_capita, healthy_life_expectancy, democratic_quality, gini_of_household_income) %>%
   filter(year != 2017) %>% 
   as.data.frame()
 
@@ -83,14 +83,28 @@ model_rf <- train(life_ladder~.,
                trControl = tr,
                method = "ranger")
 
+model_rf$results
+
 df_test <- df_happiness %>% filter(year == 2017)
 
-preds <- predict(model, df_test)
+preds <- predict(model_rf, df_test)
+
+df_test <- 
+  df_test %>% 
+  mutate(pred = preds,
+         resids = life_ladder - pred) %>% 
+  select(country, life_ladder, pred, everything()) 
 
 df_test %>% 
-  mutate(preds = preds) %>% 
-  select(country, life_ladder, preds, everything()) %>% 
-  filter(country %in% c("Finland", "United States of America", "India", "Japan"))
+  ggplot(aes(life_ladder, pred)) +
+  geom_point(alpha = 0.5) +
+  geom_abline(intercept = 0, slope = 1) +
+  scale_x_continuous(limits = c(2,8)) +
+  scale_y_continuous(limits = c(2,8))
+
+df_test %>% 
+  ggplot(aes(resids)) +
+  geom_density()
 
 (mean((preds - df_test$life_ladder)^2))^(1/2)
 
