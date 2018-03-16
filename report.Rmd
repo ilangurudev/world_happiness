@@ -15,7 +15,10 @@ pacman::p_load(tidyverse,
                corrplot, 
                mice, 
                caret,
-               naniar)
+               naniar, 
+               leaflet,
+               visdat, 
+               broom)
 
 
 df_happiness_raw <- 
@@ -36,7 +39,10 @@ df_happiness <-
 dfs_imputed <- mice(df_happiness, m=5, maxit=50, meth='pmm', seed=1)
 df_happiness <- complete(dfs_imputed, 1) %>% as_tibble()
 
-vis_miss(df_happiness)
+countries_continents <- 
+  read_csv("data/Countries-Continents.csv") %>% 
+  clean_names() %>% 
+  mutate_all(str_to_lower) 
 
 df_happiness <- 
   df_happiness %>% 
@@ -44,10 +50,31 @@ df_happiness <-
          std_ladder = standard_deviation_of_ladder_by_country_year,
          std_mean_ladder = standard_deviation_mean_of_ladder_by_country_year,
          gini_index_world_bank_mean = gini_index_world_bank_estimate_average_2000_15,
-         gini_of_household_income = gini_of_household_income_reported_in_gallup_by_wp5_year)
+         gini_of_household_income = gini_of_household_income_reported_in_gallup_by_wp5_year) %>% 
+  mutate(country = country %>% str_to_lower(),
+         country_recoded = case_when(
+           country == "russia" ~ "russian federation",
+           str_detect(country,"congo") ~ "congo",
+           country == "myanmar" ~ "burma (myanmar)",
+           country == "burkina faso" ~ "burkina",
+           str_detect(country,"china") ~ "china",
+           country == "kosovo" ~ "serbia",
+           str_detect(country,"cyprus") ~ "cyprus",
+           str_detect(country,"palest") ~ "israel",
+           str_detect(country,"somal") ~ "somalia",
+           country == "south korea" ~ "korea, south",
+           TRUE ~ country
+         )) %>% 
+  left_join(countries_continents, by = c("country_recoded" = "country"))
+
+vis_miss(df_happiness)
+
+df_happiness %>% 
+  filter(is.na(continent))
 ```
 
 ```{r eda}
+
 ggpairs(df_happiness %>% select(-country))
 ggsave("plots/pairwise_scatter.svg", dpi = 1000)
 png("plots/corrplot.png")
@@ -55,24 +82,36 @@ corrplot(cor(df_happiness %>% select(-country)))
 dev.off()
 
 df_happiness %>% 
-  # filter(year == 2017) %>% 
-  ggplot(aes(social_support, life_ladder)) +
-  geom_point(alpha = 0.5) +
-  geom_smooth(method = "loess")
+  ggplot(aes(social_support, life_ladder, col = continent)) +
+  geom_point(alpha = .7, size = 2) +
+  geom_smooth(method = "loess", aes(group = 1))
 
 
 df_happiness %>% 
   filter(year == 2017) %>% 
   arrange(healthy_life_expectancy_at_birth)
 
+# data("Countries-Continents")
+data("countries")
 
+
+# countries <- 
+#   countries %>% 
+#   as_tibble() %>%
+#   clean_names() %>%
+#   mutate(country = country %>% str_to_lower()) %>% 
+#   left_join(countries_continents)
+
+# df_happiness %>% 
+  # leaflet() %>% 
+  # addTiles()
 ```
 
 ```{r modeling}
 
-df_happiness_caret<- 
+df_happiness_caret <- 
   df_happiness %>% 
-  select(year, life_ladder, log_gdp_per_capita, healthy_life_expectancy, democratic_quality, gini_of_household_income) %>%
+  dplyr::select(year, life_ladder, continent, log_gdp_per_capita, healthy_life_expectancy, democratic_quality, gini_of_household_income) %>%
   filter(year != 2017) %>% 
   as.data.frame()
 
@@ -83,30 +122,92 @@ model_rf <- train(life_ladder~.,
                trControl = tr,
                method = "ranger")
 
-model_rf$results
+model_lm <- train(life_ladder~., 
+               data = df_happiness_caret, 
+               trControl = tr,
+               method = "lm")
+
+
+model_xgb <- train(life_ladder~., 
+               data = df_happiness_caret, 
+               trControl = tr,
+               method = "xgbTree")
+
+model_enet <- train(life_ladder~., 
+               data = df_happiness_caret, 
+               trControl = tr,
+               method = "enet")
+
+model_svm <- train(life_ladder~., 
+               data = df_happiness_caret, 
+               trControl = tr,
+               method = "svmLinear")
+
+model_knn <- train(life_ladder~., 
+               data = df_happiness_caret, 
+               trControl = tr,
+               method = "knn")
+
+
+results <- resamples(list(
+  rf = model_rf,
+  svm = model_svm,
+  xgb = model_xgb,
+  enet = model_enet,
+  lm = model_lm,
+  knn = model_knn
+))
+
+results_tidy <- 
+  results$values %>% 
+  gather(metric, value, 2:ncol(.)) %>% 
+  spread(Resample, value) %>% 
+  separate(metric, into = c("model", "metric"), sep = "~") %>% 
+  mutate(mean = (Fold1 + Fold2 + Fold3 + Fold4 + Fold5)/5) %>% 
+  gather(fold, value, starts_with("Fold")) %>% 
+  mutate(fold = fold %>% str_extract(DGT) %>% as.integer())
+
+results %>% summary()
+
+results_tidy %>% 
+  filter(metric == "RMSE") %>% 
+  ggplot(aes(fold, value, col = model)) +
+  geom_point() +
+  geom_line() +
+  geom_hline(aes(yintercept = mean, col = model), alpha = 0.5, linetype = 2)
 
 df_test <- df_happiness %>% filter(year == 2017)
 
-preds <- predict(model_rf, df_test)
-
 df_test <- 
   df_test %>% 
-  mutate(pred = preds,
-         resids = life_ladder - pred) %>% 
-  select(country, life_ladder, pred, everything()) 
+  mutate(pred_lm = predict(model_lm, df_test),
+         pred_xgb = predict(model_xgb, df_test),
+         pred_rf = predict(model_rf, df_test),
+         pred_enet = predict(model_enet, df_test),
+         pred_svm = predict(model_svm, df_test)) %>% 
+  select(country, life_ladder, starts_with("pred"), everything()) 
 
 df_test %>% 
-  ggplot(aes(life_ladder, pred)) +
+  ggplot(aes(life_ladder, pred_svm)) +
   geom_point(alpha = 0.5) +
   geom_abline(intercept = 0, slope = 1) +
   scale_x_continuous(limits = c(2,8)) +
   scale_y_continuous(limits = c(2,8))
 
-df_test %>% 
-  ggplot(aes(resids)) +
-  geom_density()
+# df_test %>% 
+#   ggplot(aes(resids)) +
+#   geom_density()
 
-(mean((preds - df_test$life_ladder)^2))^(1/2)
+df_test %>% 
+  filter(!near(pred_rf, life_ladder, 1))
+
+df_test %>% 
+  filter(near(pred_rf, life_ladder, .05))
+
+
+(mean((df_test$pred_svm - df_test$life_ladder)^2))^(1/2)
+
+1 - (sum((df_test$life_ladder - df_test$pred_rf)^2))/(nrow(df_test)*var(df_test$life_ladder))
 
 ```
 
