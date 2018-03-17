@@ -111,11 +111,17 @@ data("countries")
 
 df_happiness_caret <- 
   df_happiness %>% 
-  dplyr::select(year, life_ladder, continent, log_gdp_per_capita, healthy_life_expectancy, democratic_quality, gini_of_household_income) %>%
   filter(year != 2017) %>% 
+  dplyr::select(life_ladder, continent, log_gdp_per_capita, healthy_life_expectancy, democratic_quality, gini_of_household_income) %>%
   as.data.frame()
 
-tr <- trainControl(method = "cv", number = 5)
+df_test <- df_happiness %>% filter(year == 2017) %>% as.data.frame()
+
+pre_process_model <- preProcess(df_happiness_caret[,-1], method = c("center", "scale","BoxCox"))
+df_happiness_caret <- predict(pre_process_model, df_happiness_caret)
+df_test <- predict(pre_process_model, df_test)
+
+tr <- trainControl(method = "cv", number = 10)
 
 model_rf <- train(life_ladder~., 
                data = df_happiness_caret, 
@@ -163,9 +169,11 @@ results_tidy <-
   gather(metric, value, 2:ncol(.)) %>% 
   spread(Resample, value) %>% 
   separate(metric, into = c("model", "metric"), sep = "~") %>% 
-  mutate(mean = (Fold1 + Fold2 + Fold3 + Fold4 + Fold5)/5) %>% 
   gather(fold, value, starts_with("Fold")) %>% 
-  mutate(fold = fold %>% str_extract(DGT) %>% as.integer())
+  mutate(fold = fold %>% str_extract(one_or_more(DGT)) %>% as.integer()) %>% 
+  group_by(model, metric) %>% 
+  mutate(mean = mean(value),
+         median = median(value))
 
 results %>% summary()
 
@@ -176,10 +184,11 @@ results_tidy %>%
   geom_line() +
   geom_hline(aes(yintercept = mean, col = model), alpha = 0.5, linetype = 2)
 
-df_test <- df_happiness %>% filter(year == 2017)
+
 
 df_test <- 
   df_test %>% 
+  as_tibble() %>% 
   mutate(pred_lm = predict(model_lm, df_test),
          pred_xgb = predict(model_xgb, df_test),
          pred_rf = predict(model_rf, df_test),
@@ -188,12 +197,21 @@ df_test <-
   select(country, life_ladder, starts_with("pred"), everything()) 
 
 df_test %>% 
-  ggplot(aes(life_ladder, pred_svm)) +
+  ggplot(aes(life_ladder, pred_rf, col = continent)) +
   geom_point(alpha = 0.5) +
   geom_abline(intercept = 0, slope = 1) +
   scale_x_continuous(limits = c(2,8)) +
   scale_y_continuous(limits = c(2,8))
 
+test_acc <- 
+  df_test %>% 
+  select(country, continent, life_ladder, pred_rf) %>% 
+  mutate(resid = life_ladder - pred_rf,
+         resid_abs = abs(resid),
+         closeness = ifelse(resid_abs < mean(resid_abs), "close", "not_close"))
+  
+test_acc %>% arrange(resid_abs)
+test_acc %>% arrange(desc(resid_abs))
 # df_test %>% 
 #   ggplot(aes(resids)) +
 #   geom_density()
@@ -205,9 +223,10 @@ df_test %>%
   filter(near(pred_rf, life_ladder, .05))
 
 
-(mean((df_test$pred_svm - df_test$life_ladder)^2))^(1/2)
+(mean((df_test$pred_rf- df_test$life_ladder)^2))^(1/2)
 
 1 - (sum((df_test$life_ladder - df_test$pred_rf)^2))/(nrow(df_test)*var(df_test$life_ladder))
+ggplot() + geom_emoji(y = 5, "smile", color='darkgoldenrod1', size = 150) + ylim(0,15)
 
 ```
 
