@@ -1,15 +1,28 @@
 ---
 title: "R Notebook"
-output: html_notebook
-editor_options: 
+output:
+  html_document:
+    df_print: paged
+editor_options:
   chunk_output_type: console
 ---
 
+The World Happiness Report 2018 by United Nations Sustainable Development Solutions Network (SDSN) based on data from the Gallup World Poll surveys was out a few days ago. I had come across such a report for the first time and it got me curious right away. How do you quantify something like happiness?
 
+Basically, people in countries across the world are surveyed based on the following question: 
 
-```{r setup}
+> The response to the question of respondents' assessment of their current life based on an imaginary 11-point scale whereby 0 designates one's worst possible life and 10 denotes the best possible life respondents can imagine for themselves. Based on the question "Please imagine a ladder with steps numbered from zero at the bottom to ten at the top. Suppose we say that the top of the ladder represents the best possible life for you, and the bottom of the ladder represents the worst possible life for you. On which step of the ladder would you say you personally feel you stand at this time, assuming that the higher the step the better you feel about your life, and the lower the step the worse you feel about it? Which step comes closest to the way you feel?"
+
+It's still not completely objective. How do you know how happy you are? Are you really as happy as you think you are? I mean what is happiness anyway? Without getting too philosophical, the question is a great way to measure happiness on a macro scale. There are however some questions like how representative the sample is but let's assume that the sample indeed is representative. Luckily, they had made the summarized data publicly available.
+
+Let's get exploring!
+
+First I load all the packages I need and the data. 
+```{r setup, results='hide',message=FALSE}
 pacman::p_load(tidyverse,
+               readxl,
                GGally,
+               plotly,
                rebus, 
                janitor, 
                corrplot, 
@@ -17,33 +30,40 @@ pacman::p_load(tidyverse,
                caret,
                naniar, 
                leaflet,
-               visdat, 
-               broom)
+               visdat)
 
 
 df_happiness_raw <- 
-  readxl::read_excel("data/WHR2018Chapter2OnlineData.xls") %>% 
+  read_excel("data/WHR2018Chapter2OnlineData.xls") %>% 
   clean_names()
-
-```
-
-```{r missing values}
-
-vis_dat(df_happiness_raw)
-vis_miss(df_happiness_raw)
-
-#missing too much data as is visible
-df_happiness <- 
-  df_happiness_raw %>% select(-gini_index_world_bank_estimate) 
-
-dfs_imputed <- mice(df_happiness, m=5, maxit=50, meth='pmm', seed=1)
-df_happiness <- complete(dfs_imputed, 1) %>% as_tibble()
-
+df_subregions <- 
+  read_excel("data/WHR2018Chapter2OnlineData.xls", sheet = 5) %>% 
+  clean_names() %>% 
+  mutate_if(is.character, str_to_lower)
 countries_continents <- 
   read_csv("data/Countries-Continents.csv") %>% 
   clean_names() %>% 
   mutate_all(str_to_lower) 
+```
 
+Are there any missing values?
+```{r fig.height=6}
+vis_miss(df_happiness_raw)
+```
+
+The data has a few missing values. I will impute those values using the mice package
+```{r data preparation, message=FALSE,results='hide'}
+#missing too much data as is visible
+df_happiness <- 
+  df_happiness_raw %>% select(-gini_index_world_bank_estimate) 
+
+dfs_imputed <- mice(df_happiness, m=1, maxit=20, meth='pmm', seed=1)
+df_happiness <- complete(dfs_imputed, 1) %>% as_tibble()
+
+```
+
+I want to cross-reference continent. However, in the country-continent file I had downloaded, there were a few countries missing/with different names. I create a new variable called country recoded that fixes this with the sole purpose of getting the continent. The countries recoded will not be used for anything else and hence, I didn't worry too much about its validity. 
+```{r}
 df_happiness <- 
   df_happiness %>% 
   rename(healthy_life_expectancy = healthy_life_expectancy_at_birth,
@@ -65,65 +85,171 @@ df_happiness <-
            country == "south korea" ~ "korea, south",
            TRUE ~ country
          )) %>% 
-  left_join(countries_continents, by = c("country_recoded" = "country"))
+  left_join(countries_continents, by = c("country_recoded" = "country")) 
 
-vis_miss(df_happiness)
-
-df_happiness %>% 
-  filter(is.na(continent))
 ```
 
-```{r eda}
 
-ggpairs(df_happiness %>% select(-country))
-ggsave("plots/pairwise_scatter.svg", dpi = 1000)
-png("plots/corrplot.png")
-corrplot(cor(df_happiness %>% select(-country)))
-dev.off()
+```{r}
+vis_miss(df_happiness)
+```
 
+No more missing values.
+
+Let's do some EDA. Some maps are interactive (the legends can be used to filter!). So feel free to explore.
+
+Happiness levels have remained largely constant over the years except for South America...
+```{r fig.width=12, fig.height=9,message=FALSE,fig.align='left'}
+plt_year_happiness <- 
+  df_happiness %>% 
+  filter(year > 2005) %>% 
+  ggplot(aes(year, life_ladder, fill = continent, label = country)) +
+  geom_jitter(alpha = .55, size = 4, width = .27, height = 0,  pch=21) +
+  geom_smooth(method = "loess", se = F, aes(col = continent)) +
+  scale_x_continuous(breaks = 2005:2017) +
+  scale_y_continuous(breaks = 2:10) +
+  scale_fill_brewer(palette = "Set1") +
+  scale_color_brewer(palette = "Set1") +
+  theme_light()
+
+ggplotly(plt_year_happiness, tooltip = c("country", "continent"))
+```
+
+And the plot clearly shows the ranking of happiness levels. Although, the Nordic countries like Finland, Denmark and Norway are consistently among the top, Europe as a whole, is right there with North America and South America. Asia is about a step lower and Africa 2. 
+
+If we filter just one continent at a time, we can see that South America is the continent with the least variation in happiness levels. Asia has a huge amount of variation and so do Europe and North America. The Oceania countries are just Australia and New Zealand. Not too many countries to talk about there. 
+
+Admittedly, the mean is not the best reflector of happiness of a country. We need the variance too! We have 2 columns in the dataset named standard_deviation_of_ladder_by_country_year, standard_deviation_mean_of_ladder_by_country_year (standard error?). Not sure what the second means and assuming the first one is what I need, let's see the countries with the most and least variation. 
+```{r fig.width=12, fig.height=9,message=FALSE, fig.align='left'}
+plt_year_std <- 
+  df_happiness %>% 
+  filter(year > 2005) %>% 
+  ggplot(aes(year, std_ladder, fill = continent, label = country, size = life_ladder)) +
+  geom_jitter(alpha = .55, width = .27, height = 0,  pch=21) +
+  scale_x_continuous(breaks = 2005:2017) +
+  scale_fill_brewer(palette = "Set1") +
+  scale_color_brewer(palette = "Set1") +
+  theme_light()
+
+ggplotly(plt_year_std, tooltip = c("country", "continent","life_ladder"))
+```
+
+Wow! Many countries have a standard deviation around 3 and a happiness level around 4! Imagine the *happiness-inequality* if you will in these countries. 
+
+On the other side, the happiest countries are the ones where all of them are general very happy and not where some are extremely happy and some are just moderately happy getting averaging each other out. Powerful idea.
+
+Let's confirm this hypothesis by looking at a plot of standard deviation versus mean for 2017. 
+```{r fig.width=10, fig.height=8,message=FALSE}
+plt_std_happiness <- 
+  df_happiness %>% 
+  filter(year == 2017) %>% 
+  ggplot(aes(life_ladder, std_ladder, fill = continent, label = country, size = life_ladder)) +
+  geom_jitter(alpha = .65, width = .25, size = 3, height = 0,  pch=21) +
+  geom_smooth(aes(group = 1), se = F) +
+  scale_x_continuous(breaks = 2005:2017) +
+  scale_fill_brewer(palette = "Set1") +
+  scale_color_brewer(palette = "Set1") +
+  theme_light()
+
+ggplotly(plt_std_happiness, tooltip = c("country", "continent","life_ladder"))
+```
+
+
+Let's take a look at the correlation plot of all the variables in our dataset and explore relationships in detail. 
+```{r fig.width=12, fig.height=9,message=FALSE}
+cors <- cor(df_happiness %>% select_if(is.numeric), method = "spearman")
+corrplot(cors)
+highly_correlated_with_happiness <- cors["life_ladder",][order(-abs(cors["life_ladder",]))] %>% .[-1] %>% .[1:5]
+highly_correlated_with_happiness
+```
+
+We already analyzed the negative correlation standard deviation has with happiness.
+
+GDP per capita is the most highly correlated. No surprises here.
+```{r fig.width=10, fig.height=10, message=FALSE}
+plt_gdp_happiness <- 
+  df_happiness %>% filter(year > 2005) %>%  #we don't have neough values
+  ggplot(aes(log_gdp_per_capita, life_ladder, col = continent, label = country)) +
+  geom_point(alpha = .8, size = 2) +
+  geom_smooth(method = "loess", aes(group = 1), se = F) +
+  facet_wrap(~year) +
+  scale_color_brewer(palette = "Set1") +
+  theme_light()
+
+ggplotly(plt_gdp_happiness, tooltip = "country")
+```
+
+
+We could take a look at healthy life expectancy vs happiness too. Note that it is that's highly correlated with GDP. Also note that, it is not just life expectancy. It's healthy life expectancy! It matters how alive you are! I am not splitting by year in the next few plots. 
+```{r fig.width=12, fig.height=9,message=FALSE}
+df_happiness %>% 
+  ggplot(aes(healthy_life_expectancy, life_ladder, col = continent)) +
+  geom_point(alpha = .8, size = 2.5) +
+  geom_smooth(method = "lm", aes(group = 1), se = F) +
+  scale_color_brewer(palette = "Set1") +
+  theme_light()
+```
+
+
+So is social support. However, it is interesting to look at what social support is:
+>Social support is the national average of the binary responses (either 0 or 1) to the Gallup World Poll (GWP) question “If you were in trouble, do you have relatives or friends you can count on to help you whenever you need them, or not?” 
+
+A sense of security and connection are common among happy people. 
+
+```{r  fig.width=12, fig.height=9,message=FALSE}
 df_happiness %>% 
   ggplot(aes(social_support, life_ladder, col = continent)) +
-  geom_point(alpha = .7, size = 2) +
-  geom_smooth(method = "loess", aes(group = 1))
-
-
-df_happiness %>% 
-  filter(year == 2017) %>% 
-  arrange(healthy_life_expectancy_at_birth)
-
-# data("Countries-Continents")
-data("countries")
-
-
-# countries <- 
-#   countries %>% 
-#   as_tibble() %>%
-#   clean_names() %>%
-#   mutate(country = country %>% str_to_lower()) %>% 
-#   left_join(countries_continents)
-
-# df_happiness %>% 
-  # leaflet() %>% 
-  # addTiles()
+  geom_point(alpha = .8, size = 2.5) +
+  geom_smooth(method = "loess", aes(group = 1), se = F) +
+  scale_color_brewer(palette = "Set1") +
+  theme_light()
 ```
 
-```{r modeling}
+Okay, now to some machine learning. Let's see if we can predict happiness!!  
 
+<!-- ![Jack Nicholson smiling](https://media.giphy.com/media/S3Ot3hZ5bcy8o/giphy.gif| width=250) -->
+
+We split the data into 2 parts - year 2017 (which we'll predict on) and all the other years (which we'll build on using cross validation).
+
+I am trying to model happiness using only qualities that can easily measured. For instance, variables like generosity, social support, perception  of corruption etc are subjective. Also they are also collected in the same surveys as happiness and a model using them wouldn't be too useful. 
+
+So the variables I am using:
+
+1. Continent
+1. log GDP
+1. Healthy life expectancy
+1. Democratic quality
+1. Gini of household_income
+
+```{r}
 df_happiness_caret <- 
   df_happiness %>% 
   filter(year != 2017) %>% 
-  dplyr::select(life_ladder, continent, log_gdp_per_capita, healthy_life_expectancy, democratic_quality, gini_of_household_income) %>%
+  dplyr::select(life_ladder, continent, log_gdp_per_capita, healthy_life_expectancy, gini_of_household_income) %>%
   as.data.frame()
 
 df_test <- df_happiness %>% filter(year == 2017) %>% as.data.frame()
+```
 
+I am also centering, scaling and using box cox to remove skew as part of preprocessing. 
+```{r}
 pre_process_model <- preProcess(df_happiness_caret[,-1], method = c("center", "scale","BoxCox"))
 df_happiness_caret <- predict(pre_process_model, df_happiness_caret)
 df_test <- predict(pre_process_model, df_test)
+```
 
+
+I am trying out many models - random forests, ranger(a different implementation for RF), Radial SVM, xgboost, knn, elasticNet and a liner regression.  Like Stated above, we use 10 fold cross validation to build and validate our models and let caret take care of parameter tuning. 
+```{r modeling}
 tr <- trainControl(method = "cv", number = 10)
 
 model_rf <- train(life_ladder~., 
+               data = df_happiness_caret, 
+               trControl = tr,
+               method = "rf",
+               importance = T)
+
+model_ranger <- train(life_ladder~., 
                data = df_happiness_caret, 
                trControl = tr,
                method = "ranger")
@@ -147,7 +273,7 @@ model_enet <- train(life_ladder~.,
 model_svm <- train(life_ladder~., 
                data = df_happiness_caret, 
                trControl = tr,
-               method = "svmLinear")
+               method = "svmRadial")
 
 model_knn <- train(life_ladder~., 
                data = df_happiness_caret, 
@@ -157,6 +283,7 @@ model_knn <- train(life_ladder~.,
 
 results <- resamples(list(
   rf = model_rf,
+  ranger = model_ranger,
   svm = model_svm,
   xgb = model_xgb,
   enet = model_enet,
@@ -164,7 +291,12 @@ results <- resamples(list(
   knn = model_knn
 ))
 
-results_tidy <- 
+summary(results)
+```
+
+Perfect! Let's tidy up the results a bit and compare the models. 
+```{r fig.width=12, fig.height=9,message=FALSE}
+(results_tidy <- 
   results$values %>% 
   gather(metric, value, 2:ncol(.)) %>% 
   spread(Resample, value) %>% 
@@ -173,60 +305,73 @@ results_tidy <-
   mutate(fold = fold %>% str_extract(one_or_more(DGT)) %>% as.integer()) %>% 
   group_by(model, metric) %>% 
   mutate(mean = mean(value),
-         median = median(value))
-
-results %>% summary()
+         median = median(value)))
 
 results_tidy %>% 
   filter(metric == "RMSE") %>% 
   ggplot(aes(fold, value, col = model)) +
   geom_point() +
-  geom_line() +
-  geom_hline(aes(yintercept = mean, col = model), alpha = 0.5, linetype = 2)
-
-
-
-df_test <- 
-  df_test %>% 
-  as_tibble() %>% 
-  mutate(pred_lm = predict(model_lm, df_test),
-         pred_xgb = predict(model_xgb, df_test),
-         pred_rf = predict(model_rf, df_test),
-         pred_enet = predict(model_enet, df_test),
-         pred_svm = predict(model_svm, df_test)) %>% 
-  select(country, life_ladder, starts_with("pred"), everything()) 
-
-df_test %>% 
-  ggplot(aes(life_ladder, pred_rf, col = continent)) +
-  geom_point(alpha = 0.5) +
-  geom_abline(intercept = 0, slope = 1) +
-  scale_x_continuous(limits = c(2,8)) +
-  scale_y_continuous(limits = c(2,8))
-
-test_acc <- 
-  df_test %>% 
-  select(country, continent, life_ladder, pred_rf) %>% 
-  mutate(resid = life_ladder - pred_rf,
-         resid_abs = abs(resid),
-         closeness = ifelse(resid_abs < mean(resid_abs), "close", "not_close"))
-  
-test_acc %>% arrange(resid_abs)
-test_acc %>% arrange(desc(resid_abs))
-# df_test %>% 
-#   ggplot(aes(resids)) +
-#   geom_density()
-
-df_test %>% 
-  filter(!near(pred_rf, life_ladder, 1))
-
-df_test %>% 
-  filter(near(pred_rf, life_ladder, .05))
-
-
-(mean((df_test$pred_rf- df_test$life_ladder)^2))^(1/2)
-
-1 - (sum((df_test$life_ladder - df_test$pred_rf)^2))/(nrow(df_test)*var(df_test$life_ladder))
-ggplot() + geom_emoji(y = 5, "smile", color='darkgoldenrod1', size = 150) + ylim(0,15)
+  geom_line() + 
+  scale_color_brewer(palette = "Set1") +
+  geom_hline(aes(yintercept = mean, col = model), alpha = 0.5, linetype = 2) +
+  theme_light()
 
 ```
 
+It's a tight competition between ranger and random forest but ranger is the winner! It has the lowest average RMSE over the ten folds. 
+
+Noe let's add predictions of our model to the test set and compare the actual with the predicted results. 
+```{r fig.width=10, fig.height=8,message=FALSE}
+
+(df_test <- 
+  df_test %>% 
+  as_tibble() %>% 
+  mutate(pred_life_ladder = predict(model_ranger, df_test)) %>% 
+  select(country, life_ladder, pred_life_ladder, everything()))
+
+plt_predicted_actual <- 
+  df_test %>% 
+  ggplot(aes(life_ladder, pred_life_ladder, col = continent, label = country)) +
+  geom_abline(intercept = 0, slope = 1, alpha = 0.5) +
+  geom_point(size = 2) +
+  scale_x_continuous(limits = c(2,8)) +
+  scale_y_continuous(limits = c(2,8)) +
+  theme_light()
+
+ggplotly(plt_predicted_actual)
+
+```
+
+Our model does a pretty neat job predicting happiness. Except in the lower tail where it's a little off, the overall predictions are seem decent. Some countries actually have spot on predictions! On an average it is about `r (mean((df_test$pred_life_ladder- df_test$life_ladder)^2))^(1/2)` steps off. 
+
+Let's take a look at our best and worst predictions. 
+```{r}
+(test_acc <- 
+  df_test %>% 
+  select(country, continent, life_ladder, pred_life_ladder) %>% 
+  mutate(resid = life_ladder - pred_life_ladder,
+         resid_abs = abs(resid),
+         closeness = ifelse(resid_abs < mean(resid_abs), "close", "not_close")))
+```
+
+The countries which our model is off by a step.
+```{r}
+df_test %>% 
+  filter(!near(pred_life_ladder, life_ladder, 1))
+
+```
+
+The countries that are predicted extremely well.
+```{r}
+df_test %>% 
+  filter(near(pred_life_ladder, life_ladder, .05))
+```
+
+And what does a machine learning model have to say about which variables it found most useful to predict?
+```{r fig.width=12, fig.height=9,message=FALSE}
+plot(varImp(model_rf))
+```
+
+The continents are obviously very useful. But the most important predictor is GDP!
+
+Let me know your comments, questions, feedback in the comments below.. Thanks for reading!
